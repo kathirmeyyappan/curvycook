@@ -102,8 +102,8 @@ export const DEFAULT_OPTIONS: BotOptions = {
   oppReach: 32,
   momentum: 0,
   fillMode: false,
-  proximityRange: 14,
-  proximityWeight: 300,
+  proximityRange: 18,
+  proximityWeight: 200,
 };
 
 const TURNS: readonly Turn[] = [0, -1, 1];

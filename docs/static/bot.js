@@ -553,8 +553,8 @@ var DEFAULT_OPTIONS = {
   oppReach: 32,
   momentum: 0,
   fillMode: false,
-  proximityRange: 14,
-  proximityWeight: 300
+  proximityRange: 18,
+  proximityWeight: 200
 };
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];

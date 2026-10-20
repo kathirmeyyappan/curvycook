@@ -80,14 +80,53 @@ Every 4 ticks (`src/bot/bot.ts`):
 3. Positions are scored by territory on a "fat" 2-unit grid (cells reached
    strictly first, with trails inflated so corridors too narrow to turn in do
    not count), by the free area left on a fine 1-unit grid (so it hugs walls
-   instead of wasting space), and by a distance-keeping term.
+   instead of wasting space), and by a distance-keeping term that grows
+   quadratically inside 18 units of the opponent's head.
 4. Each first manoeuvre must also pass an escape search: a depth-first
    search over the bot's own manoeuvres, memoised by position and heading,
-   that must find a 400-tick collision-free continuation ending in open space
-   and using only space the bot reaches before the opponent could.
+   that must find a 640-tick collision-free continuation ending in open space
+   and using only space the bot reaches before the opponent could within the
+   opponent's next two windows. Moves without one are heavily penalised.
 
-It is deterministic and takes ~15 ms per plan, so it runs in real time in the
-browser worker.
+It is deterministic, takes 15–35 ms per plan in Node (up to ~250 ms in the
+worst positions), and runs in real time in the browser worker.
+
+Every weight above is a `BotOptions` field, so variants can be measured
+without code changes (`--bot-opts='{"proximityRange":18}'`).
+
+## Results
+
+All numbers come from `npm run match` in the real simulator with the real
+checkpoint, both seat orders per seed, deterministic (greedy) checkpoint play.
+
+| Configuration | Seeds 0–15 (32 games) | Seeds 16–31 (32 games) | Overall |
+| --- | --- | --- | --- |
+| previous defaults (distance keeping range 14 / weight 300) | 26–6 | 15–17 | 41–23, 64% |
+| **shipped defaults** (range 18 / weight 200) | 22–10 | 20–12 | 42–22, 66% |
+| range 22 / weight 150 | – | 16–16 | – |
+
+One game in 160 was tied. The two seed batches differ by 20–30 points for every
+configuration tried, so differences of less than ~10 points between
+configurations are noise at this sample size.
+
+Where the bot still loses (from the recorded games, `scripts/doomed.mjs` and
+`scripts/debug/partition.mts`):
+
+- Space races: both players end up in separate regions and the bot's region
+  is the smaller or less efficiently filled one, so it runs out of room first
+  (it dies on its own trail after 1500–3000 ticks). The contested-phase play
+  does not yet build deliberate walls; the Voronoi share swings a lot while
+  both players roam.
+- Close encounters: running roughly parallel to the checkpoint 8–12 units
+  away, a single left turn of the checkpoint closes the gap faster than the
+  16-tick lookahead sees. The distance-keeping term reduces these from 11 to 2
+  losses on the hard seed batch at the cost of a few more space races.
+
+Variants that were measured and did not help (all on seeds 0–15, same
+baseline 26–6): straightness bonus (16–16), lane-following escape order with
+wall hugging (16–15–1), longer opponent-reach horizon (16–16), a dedicated
+fill mode that follows the escape search's own path once separated (11–21),
+momentum evaluation (14–18) and bolder territory claims (abandoned at 0–5).
 
 ## Commands
 
