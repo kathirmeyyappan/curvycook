@@ -1,10 +1,9 @@
-# Deploys docs/ to GitHub Pages. Only needed if the repository's Pages source
-# is set to "GitHub Actions"; with "Deploy from a branch" + "/docs" no
-# workflow is required at all.
+# Builds the bot bundle and deploys docs/ to GitHub Pages.
+# Repository settings → Pages → Build and deployment → Source: "GitHub Actions".
 name: pages
 on:
   push:
-    branches: [main]
+    branches: [main, kathir/curvycook-bot]
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,16 +13,27 @@ concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=optional
+      - run: npm run typecheck
+      - run: npm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
       - id: deployment
         uses: actions/deploy-pages@v4

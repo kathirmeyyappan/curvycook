@@ -145,10 +145,16 @@ node scripts/e2e.mjs --rounds=2            # play rounds in headless Chromium ag
 
 ## GitHub Pages
 
-The site is the `docs/` folder. In the repository settings choose
-Pages → Build and deployment → Source "Deploy from a branch", branch `main`,
-folder `/docs`. (Alternatively set the source to "GitHub Actions"; the
-`pages` workflow uploads `docs/`.)
+The `pages` workflow (`.github/workflows/pages.yml`) builds the bot bundle,
+type-checks, and deploys `docs/` on every push to `main` or
+`kathir/curvycook-bot`, and on manual dispatch. One-time setup in the
+repository settings: Pages → Build and deployment → Source: "GitHub Actions".
+If the `github-pages` environment only allows the default branch, add the
+branch under Settings → Environments → github-pages → Deployment branches,
+or merge to `main`.
+
+Without Actions the site also works as a plain branch deployment: Pages →
+Source "Deploy from a branch", folder `/docs` (the built bundle is committed).
 
 The page opens on Curvycook (the bot) vs Shai Hulud (the checkpoint). Use the
 player search to add "You" to play either of them with the arrow keys.
