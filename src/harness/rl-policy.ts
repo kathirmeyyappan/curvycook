@@ -16,7 +16,11 @@ export class RlPolicy {
   private constructor(private readonly ort: any, private readonly session: any, private readonly actor: ModelActor) {}
 
   static async load(actor: ModelActor): Promise<RlPolicy> {
-    const mod: any = await import("onnxruntime-node");
+    // Resolved at run time only: onnxruntime-node is an optional dependency
+    // (the site and the engine tests do not need it), so keep the type
+    // checker from resolving the specifier.
+    const specifier = "onnxruntime-node";
+    const mod: any = await import(specifier);
     const ort = mod.InferenceSession ? mod : mod.default;
     const url = actor.model.url;
     const file = url.startsWith("http") ? url : path.join(DOCS_DIR, "static", url);
