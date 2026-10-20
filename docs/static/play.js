@@ -7028,11 +7028,13 @@ function addSeat(spec) {
   playerSearchInput.value = "";
   playerSearch.hide();
   const opponents = human ? seats.slice(1) : seats.slice();
+  // The local simulator seats two players: adding one replaces the last opponent.
   if (spec === "you") {
-    if (!human) configureSeats(true, opponents);
+    if (!human) configureSeats(true, opponents.slice(0, 1));
     return;
   }
-  configureSeats(human, [...opponents, spec]);
+  const kept = human ? opponents.slice(0, 0) : opponents.slice(0, 1);
+  configureSeats(human, [...kept, spec]);
 }
 function removeSeat(index) {
   if (running || seats.length <= 1) return;

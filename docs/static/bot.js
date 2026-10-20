@@ -532,7 +532,7 @@ var FINE_CELL = 1;
 var FINE_RADIUS = COLLIDE;
 
 // src/bot/bot.ts
-var DEFAULT_OPTIONS = { replan: 4, segment: 8, escape: 400, openArea: 30, escapeBudget: 6e3 };
+var DEFAULT_OPTIONS = { replan: 4, segment: 8, escape: 640, openArea: 20, escapeBudget: 2500 };
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];
 var DEAD = -1e9;
@@ -564,6 +564,8 @@ var Bot = class {
   stack = new Float64Array(STRIDE * 256);
   turns = [0, 0];
   memo = new Int32Array(MEMO_GRID * MEMO_GRID * HEADINGS);
+  dfsOrders = Array.from({ length: 128 }, () => [0, -1, 1]);
+  dfsClearances = Array.from({ length: 128 }, () => new Float64Array(3));
   memoStamp = 0;
   /** Diagnostics from the last plan. */
   lastPlanMs = 0;
@@ -752,7 +754,7 @@ var Bot = class {
     const dx = other.x - mine.x;
     const dy = other.y - mine.y;
     const d = Math.sqrt(dx * dx + dy * dy);
-    if (d < 14) score -= (14 - d) * (14 - d) * 40;
+    if (d < 14) score -= (14 - d) * (14 - d) * 300;
     return score;
   }
   /**
@@ -788,9 +790,11 @@ var Bot = class {
     this.fat.sync();
     const oppDist = other.alive ? this.territory.fill(opp) && this.territory.dist[opp] : null;
     const fat = this.fat;
-    const order = [0, -1, 1];
-    const clearance = new Float64Array(3);
+    const orders = this.dfsOrders;
+    const clearances = this.dfsClearances;
     const dfs = (remaining, depth) => {
+      const order = orders[depth];
+      const clearance = clearances[depth];
       const driven = horizon - remaining;
       if (driven > best) {
         best = driven;
@@ -798,13 +802,16 @@ var Bot = class {
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= OPP_REACH && od + OPP_MARGIN < driven) return false;
+        if (od <= OPP_REACH && od + OPP_MARGIN < driven) {
+          if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
+          return false;
+        }
       }
       if (remaining <= 0) {
-        this.fat.sync();
+        this.syncGrids();
         const area = this.territory.floodArea(me);
         if (debug) this.lastEndArea = area;
-        return area >= this.options.openArea;
+        return area >= this.options.openArea || this.space.floodArea(me) >= 200;
       }
       if (++nodes > budget) {
         exhausted = true;
@@ -816,7 +823,10 @@ var Bot = class {
       if (h < 0) h += HEADINGS;
       const key = (cy * MEMO_GRID + cx) * HEADINGS + h;
       const seen = memo[key];
-      if (seen >>> 12 === stamp && (seen & 4095) >= remaining) return false;
+      if (seen >>> 12 === stamp && (seen & 4095) >= remaining) {
+        if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} pruned: memo ${seen & 4095}`);
+        return false;
+      }
       memo[key] = stamp << 12 | remaining;
       const here = at + STRIDE * (depth + 1);
       game.save(stack, here);
@@ -832,6 +842,7 @@ var Bot = class {
       }
       for (let i = 0; i < 3; i++) order[i] = TURNS[i];
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);
+      if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} clearance S/R/L ${Array.from(clearance).map((c) => c.toFixed(1)).join("/")} order ${order.join(",")}`);
       for (const turn of order) {
         if (clearance[TURNS.indexOf(turn)] < 0) continue;
         game.load(stack, here);
@@ -860,6 +871,7 @@ var Bot = class {
   }
 };
 var now = typeof performance !== "undefined" ? () => performance.now() : () => Date.now();
+var traceDfs = typeof process !== "undefined" && !!process.env?.TRACE_DFS;
 
 // src/web/bot-policy.ts
 function createBotPolicy(simulator, seat, options = {}) {

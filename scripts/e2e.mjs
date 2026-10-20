@@ -14,12 +14,15 @@ const opt = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.sl
 const rounds = Number(opt("rounds", "1"));
 const screenshot = opt("screenshot", "");
 const seed = opt("seed", "");
+const human = args.includes("--human");
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".wasm": "application/wasm", ".py": "text/plain", ".json": "application/json", ".ort": "application/octet-stream", ".wrp": "application/octet-stream", ".png": "image/png" };
+const errors = [];
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
   let file = path.join(docs, url === "/" ? "index.html" : url);
   if (!file.startsWith(docs) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    errors.push(`http 404: ${url}`);
     res.writeHead(404);
     res.end("not found");
     return;
@@ -33,7 +36,6 @@ const port = server.address().port;
 const executablePath = fs.readdirSync("/opt/pw-browsers").filter((d) => d.startsWith("chromium-")).map((d) => `/opt/pw-browsers/${d}/chrome-linux/chrome`).find((p) => fs.existsSync(p));
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
-const errors = [];
 page.on("pageerror", (e) => errors.push(`page error: ${e.message}`));
 page.on("console", (m) => {
   if (m.text().startsWith("[curvycook]")) console.log("  " + m.text());
@@ -49,6 +51,17 @@ await page.goto(`http://127.0.0.1:${port}/${seed ? `?seed=${seed}` : ""}`, { wai
 await page.waitForSelector("#waiting.ready", { timeout: 120000 });
 console.log(`ready after ${((Date.now() - t0) / 1000).toFixed(1)}s (runtime + model loaded)`);
 console.log("players:", await page.$$eval("#player-list .player-name, #player-list .name, #player-list", (els) => els.map((e) => e.textContent.trim().replace(/\s+/g, " ")).join(" | ")));
+if (human) {
+  // Add "You" through the player search; the page replaces the second seat.
+  // The search box is a Shoelace web component; its native input is in the shadow DOM.
+  const box = page.locator("#player-search-input").locator("input");
+  await box.click();
+  await box.fill("you");
+  await page.waitForSelector(".player-option", { timeout: 10000 });
+  await page.click(".player-option");
+  await page.waitForSelector("#waiting.ready", { timeout: 120000 });
+  console.log("players:", await page.$$eval("#player-list", (els) => els.map((e) => e.textContent.trim().replace(/\s+/g, " ")).join(" | ")));
+}
 for (let round = 1; round <= rounds; round++) {
   const t1 = Date.now();
   await page.keyboard.press("s");

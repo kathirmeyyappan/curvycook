@@ -55,13 +55,13 @@ export interface BotOptions {
   segment: number;
   /** Ticks of collision-free continuation a candidate must keep available. */
   escape: number;
-  /** Open area (fat cells, 4 units² each) required at the end of the escape search. */
+  /** Open area (fat cells, 4 units² each) required at the end of the escape search, unless plenty of fine free cells remain. */
   openArea: number;
   /** Maximum segments the escape search may drive before giving up (then assumed safe). */
   escapeBudget: number;
 }
 
-export const DEFAULT_OPTIONS: BotOptions = { replan: 4, segment: 8, escape: 400, openArea: 30, escapeBudget: 6000 };
+export const DEFAULT_OPTIONS: BotOptions = { replan: 4, segment: 8, escape: 640, openArea: 20, escapeBudget: 2500 };
 
 const TURNS: readonly Turn[] = [0, -1, 1];
 const PRINT_ALL = [true, true];
@@ -95,6 +95,8 @@ export class Bot {
   private readonly stack = new Float64Array(STRIDE * 256);
   private readonly turns: Turn[] = [0, 0];
   private readonly memo = new Int32Array(MEMO_GRID * MEMO_GRID * HEADINGS);
+  private readonly dfsOrders: Turn[][] = Array.from({ length: 128 }, () => [0, -1, 1] as Turn[]);
+  private readonly dfsClearances: Float64Array[] = Array.from({ length: 128 }, () => new Float64Array(3));
   private memoStamp = 0;
   /** Diagnostics from the last plan. */
   lastPlanMs = 0;
@@ -316,7 +318,7 @@ export class Bot {
     const dx = other.x - mine.x;
     const dy = other.y - mine.y;
     const d = Math.sqrt(dx * dx + dy * dy);
-    if (d < 14) score -= (14 - d) * (14 - d) * 40;
+    if (d < 14) score -= (14 - d) * (14 - d) * 300;
     return score;
   }
 
@@ -355,9 +357,12 @@ export class Bot {
     this.fat.sync();
     const oppDist = other.alive ? this.territory.fill(opp) && this.territory.dist[opp] : null;
     const fat = this.fat;
-    const order: Turn[] = [0, -1, 1];
-    const clearance = new Float64Array(3);
+    // Per-depth scratch space: a child call must not clobber its parent's loop.
+    const orders = this.dfsOrders;
+    const clearances = this.dfsClearances;
     const dfs = (remaining: number, depth: number): boolean => {
+      const order = orders[depth];
+      const clearance = clearances[depth];
       const driven = horizon - remaining;
       if (driven > best) {
         best = driven;
@@ -365,13 +370,18 @@ export class Bot {
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= OPP_REACH && od + OPP_MARGIN < driven) return false;
+        if (od <= OPP_REACH && od + OPP_MARGIN < driven) {
+          if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
+          return false;
+        }
       }
       if (remaining <= 0) {
-        this.fat.sync();
+        // Survived the whole horizon: accept if it ends somewhere with room to
+        // manoeuvre (fat cells) or with plenty of free space left (fine cells).
+        this.syncGrids();
         const area = this.territory.floodArea(me);
         if (debug) this.lastEndArea = area;
-        return area >= this.options.openArea;
+        return area >= this.options.openArea || this.space.floodArea(me) >= 200;
       }
       if (++nodes > budget) {
         exhausted = true;
@@ -383,7 +393,10 @@ export class Bot {
       if (h < 0) h += HEADINGS;
       const key = (cy * MEMO_GRID + cx) * HEADINGS + h;
       const seen = memo[key];
-      if ((seen >>> 12) === stamp && (seen & 0xfff) >= remaining) return false;
+      if ((seen >>> 12) === stamp && (seen & 0xfff) >= remaining) {
+        if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} pruned: memo ${seen & 0xfff}`);
+        return false;
+      }
       memo[key] = (stamp << 12) | remaining;
       const here = at + STRIDE * (depth + 1);
       game.save(stack, here);
@@ -400,6 +413,7 @@ export class Bot {
       }
       for (let i = 0; i < 3; i++) order[i] = TURNS[i];
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);
+      if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} clearance S/R/L ${Array.from(clearance).map((c) => c.toFixed(1)).join("/")} order ${order.join(",")}`);
       for (const turn of order) {
         if (clearance[TURNS.indexOf(turn)] < 0) continue;
         game.load(stack, here);
@@ -429,5 +443,6 @@ export class Bot {
 }
 
 const now = typeof performance !== "undefined" ? () => performance.now() : () => Date.now();
+const traceDfs = typeof process !== "undefined" && !!process.env?.TRACE_DFS;
 
 export { WARMUP, MAX_TICKS, SPEED };
