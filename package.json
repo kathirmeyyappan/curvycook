@@ -1,0 +1,23 @@
+{
+  "name": "curvycook",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Curvytron: a geometric search bot (TypeScript) that beats the curvytron-rl checkpoint, plus a GitHub Pages site to watch it play.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/engine/validate.ts",
+    "match": "tsx src/harness/match.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "playwright-core": "^1.64.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.22.0"
+  }
+}

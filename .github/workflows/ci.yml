@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --onnxruntime-node-install-cuda=skip
+      - run: npm run typecheck
+      - run: npm run build
+      - name: the built bundle is committed and up to date
+        run: git diff --exit-code docs/static/bot.js
+      - name: engine agrees with the Warp simulator
+        run: npx tsx src/engine/validate.ts 40
