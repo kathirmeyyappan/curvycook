@@ -296,8 +296,11 @@ export class Territory {
     return area;
   }
 
-  /** Voronoi evaluation from `me`'s point of view. */
-  evaluate(me: number, opp: number): TerritoryResult {
+  /**
+   * Voronoi evaluation from `me`'s point of view. `oppSlack` scales the
+   * opponent's travel times (> 1 assumes it contests space more slowly).
+   */
+  evaluate(me: number, opp: number, oppSlack = 1): TerritoryResult {
     const reachMe = this.fill(me);
     const reachOpp = this.fill(opp);
     const a = this.dist[me];
@@ -311,8 +314,9 @@ export class Territory {
       const db = b[c];
       if (da === INF && db === INF) continue;
       if (da !== INF && db !== INF) contested = true;
-      if (da < db) mine++;
-      else if (db < da) theirs++;
+      const dbs = db === INF ? INF : db * oppSlack;
+      if (da < dbs) mine++;
+      else if (dbs < da) theirs++;
     }
     return { mine, theirs, reachMe, reachOpp, contested };
   }

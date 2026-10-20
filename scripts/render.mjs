@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
 
-const files = process.argv.slice(2);
+const until = Number(process.argv.find((a) => a.startsWith("--until="))?.slice(8) ?? 0);
+const files = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 if (!files.length) {
   console.error("usage: node scripts/render.mjs game.json [...]");
   process.exit(1);
@@ -17,6 +18,26 @@ page.on("console", (m) => { if (m.type() === "error") console.error("console:", 
 
 for (const file of files) {
   const game = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (until) {
+    // Keep only what existed at tick `until`: bodies laid by then and the track up to then.
+    const byTick = new Map(game.track.map((r) => [r[0], r]));
+    let scan = 0;
+    const kept = [];
+    for (const b of game.bodies) {
+      let laid = -1;
+      for (let t = scan; t <= game.ticks; t++) {
+        const r = byTick.get(t);
+        if (r && Math.abs(r[1 + 4 * b.owner] - b.x) < 1e-3 && Math.abs(r[2 + 4 * b.owner] - b.y) < 1e-3) { laid = t; break; }
+      }
+      if (laid > scan + 8) scan = laid - 8;
+      if (laid >= 0 && laid <= until) kept.push(b);
+    }
+    game.bodies = kept;
+    game.track = game.track.filter((r) => r[0] <= until);
+    game.ticks = until;
+    game.causes = [null, null];
+    game.winner = -1;
+  }
   const html = `<!doctype html><body style="margin:0;background:#fff"><canvas id=c width=900 height=900></canvas><script>(() => {
 const g = ${JSON.stringify(game)};
 const S = 880 / 88, O = 10;
@@ -40,7 +61,7 @@ c.fillText("seed " + g.seed + "  green=" + kinds[0] + "  red=" + kinds[1] + "  w
 })();</script></body>`;
   await page.setContent(html, { waitUntil: "load" });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
-  const out = file.replace(/\.json$/, ".png");
+  const out = file.replace(/\.json$/, until ? `-t${until}.png` : ".png");
   await page.screenshot({ path: out });
   console.log("wrote", out);
 }

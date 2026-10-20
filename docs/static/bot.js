@@ -505,8 +505,11 @@ var Territory = class {
     }
     return area;
   }
-  /** Voronoi evaluation from `me`'s point of view. */
-  evaluate(me, opp) {
+  /**
+   * Voronoi evaluation from `me`'s point of view. `oppSlack` scales the
+   * opponent's travel times (> 1 assumes it contests space more slowly).
+   */
+  evaluate(me, opp, oppSlack = 1) {
     const reachMe = this.fill(me);
     const reachOpp = this.fill(opp);
     const a = this.dist[me];
@@ -520,8 +523,9 @@ var Territory = class {
       const db = b[c];
       if (da === INF && db === INF) continue;
       if (da !== INF && db !== INF) contested = true;
-      if (da < db) mine++;
-      else if (db < da) theirs++;
+      const dbs = db === INF ? INF : db * oppSlack;
+      if (da < dbs) mine++;
+      else if (dbs < da) theirs++;
     }
     return { mine, theirs, reachMe, reachOpp, contested };
   }
@@ -532,28 +536,50 @@ var FINE_CELL = 1;
 var FINE_RADIUS = COLLIDE;
 
 // src/bot/bot.ts
-var DEFAULT_OPTIONS = { replan: 4, segment: 8, escape: 640, openArea: 20, escapeBudget: 2500 };
+var DEFAULT_OPTIONS = {
+  replan: 4,
+  segment: 8,
+  escape: 640,
+  openArea: 20,
+  escapeBudget: 2500,
+  memoCell: 1,
+  memoHeadings: 24,
+  fatRadius: FAT_RADIUS,
+  straightBonus: 0,
+  reversalPenalty: 0,
+  oppSlack: 1,
+  hugBonus: 0,
+  dfsOrder: "open",
+  oppReach: 32
+};
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];
 var DEAD = -1e9;
 var STRIDE = Game.SAVE_STRIDE;
-var MEMO_CELL = 1;
-var MEMO_GRID = Math.ceil(ARENA / MEMO_CELL);
-var HEADINGS = 24;
-var OPP_REACH = 32;
+var MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
 var OPP_MARGIN = 8;
 var Bot = class {
   constructor(me, options = {}) {
     this.me = me;
     this.options = { ...DEFAULT_OPTIONS, ...options };
+    this.fat = new Occupancy(this.game.bodies, FAT_CELL, this.options.fatRadius, 1.2);
+    this.territory = new Territory(this.game, this.fat);
+    this.memoCell = this.options.memoCell;
+    this.memoGrid = Math.ceil(ARENA / this.memoCell) + 1;
+    this.headings = this.options.memoHeadings;
+    this.memo = new Int32Array(this.memoGrid * this.memoGrid * this.headings);
     this.game.endsWhenOneLeft = false;
   }
   game = new Game(2);
-  fat = new Occupancy(this.game.bodies, FAT_CELL, FAT_RADIUS, 1.2);
-  fine = new Occupancy(this.game.bodies, FINE_CELL, FINE_RADIUS, 0.6);
-  territory = new Territory(this.game, this.fat);
-  space = new Territory(this.game, this.fine);
   options;
+  fat;
+  fine = new Occupancy(this.game.bodies, FINE_CELL, FINE_RADIUS, 0.6);
+  territory;
+  space = new Territory(this.game, this.fine);
+  memoGrid;
+  memoCell;
+  headings;
+  lastTurn = 0;
   plan = [];
   planFrom = -1;
   lastTick = -1;
@@ -563,7 +589,7 @@ var Bot = class {
   oppTurn = 0;
   stack = new Float64Array(STRIDE * 256);
   turns = [0, 0];
-  memo = new Int32Array(MEMO_GRID * MEMO_GRID * HEADINGS);
+  memo;
   dfsOrders = Array.from({ length: 128 }, () => [0, -1, 1]);
   dfsClearances = Array.from({ length: 128 }, () => new Float64Array(3));
   memoStamp = 0;
@@ -582,6 +608,7 @@ var Bot = class {
   lastEndArea = 0;
   reset() {
     this.plan = [];
+    this.lastTurn = 0;
     this.planFrom = -1;
     this.lastTick = -1;
     this.knownBodies = 0;
@@ -678,6 +705,8 @@ var Bot = class {
         if (oppTurn === this.oppTurn) likely = score2;
       }
       let score = 0.5 * worst + 0.5 * likely;
+      if (turn === 0) score += this.options.straightBonus;
+      else if (this.lastTurn !== 0 && turn !== this.lastTurn) score -= this.options.reversalPenalty;
       let esc = 0;
       if (likely > DEAD + MAX_TICKS) {
         game.load(stack, 0);
@@ -698,6 +727,7 @@ var Bot = class {
     this.lastScore = bestScore;
     this.lastEscape = bestEscape;
     this.lastTerritory = bestTerritory;
+    this.lastTurn = bestTurn;
     const plan = [];
     for (let i = 0; i < first; i++) plan.push(bestTurn);
     return plan;
@@ -742,7 +772,7 @@ var Bot = class {
     if (!mine.alive) return DEAD + game.tick;
     if (!other.alive) return -DEAD - game.tick;
     this.syncGrids();
-    const t = this.territory.evaluate(me, opp);
+    const t = this.territory.evaluate(me, opp, this.options.oppSlack);
     const room = this.space.floodArea(me);
     let score = 0;
     if (t.contested) {
@@ -751,6 +781,12 @@ var Bot = class {
       score += (t.reachMe - t.reachOpp) * 6;
     }
     score += room * 0.5;
+    if (!t.contested && this.options.hugBonus) {
+      const wall = Math.min(mine.x, mine.y, ARENA - mine.x, ARENA - mine.y) - 0.6;
+      const clearance = Math.min(wall, Math.sqrt(game.bodies.nearest2(mine.x, mine.y, 6)) - 1.2);
+      if (clearance >= 0.1 && clearance <= 1) score += this.options.hugBonus;
+      else if (clearance < 2) score += this.options.hugBonus * (2 - clearance);
+    }
     const dx = other.x - mine.x;
     const dy = other.y - mine.y;
     const d = Math.sqrt(dx * dx + dy * dy);
@@ -802,7 +838,7 @@ var Bot = class {
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= OPP_REACH && od + OPP_MARGIN < driven) {
+        if (od <= this.options.oppReach && od + OPP_MARGIN < driven) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
@@ -817,11 +853,13 @@ var Bot = class {
         exhausted = true;
         return false;
       }
-      const cx = Math.min(MEMO_GRID - 1, Math.max(0, Math.floor(mine.x / MEMO_CELL)));
-      const cy = Math.min(MEMO_GRID - 1, Math.max(0, Math.floor(mine.y / MEMO_CELL)));
-      let h = Math.round(mine.angle / (2 * Math.PI) * HEADINGS) % HEADINGS;
-      if (h < 0) h += HEADINGS;
-      const key = (cy * MEMO_GRID + cx) * HEADINGS + h;
+      const memoGrid = this.memoGrid;
+      const headings = this.headings;
+      const cx = Math.min(memoGrid - 1, Math.max(0, Math.floor(mine.x / this.memoCell)));
+      const cy = Math.min(memoGrid - 1, Math.max(0, Math.floor(mine.y / this.memoCell)));
+      let h = Math.round(mine.angle / (2 * Math.PI) * headings) % headings;
+      if (h < 0) h += headings;
+      const key = (cy * memoGrid + cx) * headings + h;
       const seen = memo[key];
       if (seen >>> 12 === stamp && (seen & 4095) >= remaining) {
         if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} pruned: memo ${seen & 4095}`);
@@ -831,6 +869,7 @@ var Bot = class {
       const here = at + STRIDE * (depth + 1);
       game.save(stack, here);
       const ticks = Math.min(seg, remaining);
+      const lane = this.options.dfsOrder === "lane";
       for (let i = 0; i < 3; i++) {
         const turn = TURNS[i];
         game.load(stack, here);
@@ -838,7 +877,9 @@ var Bot = class {
           clearance[i] = -1;
           continue;
         }
-        clearance[i] = game.bodies.nearest2(mine.x, mine.y, 6) + Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y) ** 2;
+        const wall = Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y);
+        const gap = Math.min(Math.sqrt(game.bodies.nearest2(mine.x, mine.y, 6)) - 1.2, wall - 0.6);
+        clearance[i] = lane ? 10 - Math.abs(gap - 0.8) : gap;
       }
       for (let i = 0; i < 3; i++) order[i] = TURNS[i];
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);

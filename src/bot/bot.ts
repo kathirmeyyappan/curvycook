@@ -57,19 +57,49 @@ export interface BotOptions {
   escape: number;
   /** Open area (fat cells, 4 units² each) required at the end of the escape search, unless plenty of fine free cells remain. */
   openArea: number;
-  /** Maximum segments the escape search may drive before giving up (then assumed safe). */
+  /** Maximum segments the escape search may drive before giving up (then treated as unsafe). */
   escapeBudget: number;
+  /** Memo granularity of the escape search: cell size in units and number of heading buckets. */
+  memoCell: number;
+  memoHeadings: number;
+  /** Bodies are inflated to this radius on the territory grid (collision distance is 1.2). */
+  fatRadius: number;
+  /** Score bonus for keeping straight (smooth trails waste less space). */
+  straightBonus: number;
+  /** Score penalty for reversing the previous plan's turn direction. */
+  reversalPenalty: number;
+  /** Opponent travel-time scale in the territory race (> 1 claims space more boldly). */
+  oppSlack: number;
+  /** Once separated, bonus for keeping the head at lane distance (1.3–2.2) from the nearest obstacle. */
+  hugBonus: number;
+  /** Escape search move ordering: "open" tries the most open manoeuvre first, "lane" the one that follows walls. */
+  dfsOrder: "open" | "lane";
+  /** Space the opponent can reach within this many ticks is not mine to escape through if it gets there first. */
+  oppReach: number;
 }
 
-export const DEFAULT_OPTIONS: BotOptions = { replan: 4, segment: 8, escape: 640, openArea: 20, escapeBudget: 2500 };
+export const DEFAULT_OPTIONS: BotOptions = {
+  replan: 4,
+  segment: 8,
+  escape: 640,
+  openArea: 20,
+  escapeBudget: 2500,
+  memoCell: 1,
+  memoHeadings: 24,
+  fatRadius: FAT_RADIUS,
+  straightBonus: 0,
+  reversalPenalty: 0,
+  oppSlack: 1,
+  hugBonus: 0,
+  dfsOrder: "open",
+  oppReach: 32,
+};
 
 const TURNS: readonly Turn[] = [0, -1, 1];
 const PRINT_ALL = [true, true];
 const DEAD = -1e9;
 const STRIDE = Game.SAVE_STRIDE;
-const MEMO_CELL = 1; // units
-const MEMO_GRID = Math.ceil(ARENA / MEMO_CELL);
-const HEADINGS = 24;
+const MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
 /**
  * Space the opponent can reach within this many ticks (two of its manoeuvre
  * windows) is not mine to escape through if it gets there first; beyond that
@@ -80,11 +110,15 @@ const OPP_MARGIN = 8;
 
 export class Bot {
   readonly game = new Game(2);
-  readonly fat = new Occupancy(this.game.bodies, FAT_CELL, FAT_RADIUS, 1.2);
-  readonly fine = new Occupancy(this.game.bodies, FINE_CELL, FINE_RADIUS, 0.6);
-  readonly territory = new Territory(this.game, this.fat);
-  readonly space = new Territory(this.game, this.fine);
   readonly options: BotOptions;
+  readonly fat: Occupancy;
+  readonly fine = new Occupancy(this.game.bodies, FINE_CELL, FINE_RADIUS, 0.6);
+  readonly territory: Territory;
+  readonly space = new Territory(this.game, this.fine);
+  private readonly memoGrid: number;
+  private readonly memoCell: number;
+  private readonly headings: number;
+  private lastTurn: Turn = 0;
   private plan: Turn[] = [];
   private planFrom = -1;
   private lastTick = -1;
@@ -94,7 +128,7 @@ export class Bot {
   private oppTurn: Turn = 0;
   private readonly stack = new Float64Array(STRIDE * 256);
   private readonly turns: Turn[] = [0, 0];
-  private readonly memo = new Int32Array(MEMO_GRID * MEMO_GRID * HEADINGS);
+  private readonly memo: Int32Array;
   private readonly dfsOrders: Turn[][] = Array.from({ length: 128 }, () => [0, -1, 1] as Turn[]);
   private readonly dfsClearances: Float64Array[] = Array.from({ length: 128 }, () => new Float64Array(3));
   private memoStamp = 0;
@@ -114,12 +148,19 @@ export class Bot {
 
   constructor(public readonly me: number, options: Partial<BotOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
+    this.fat = new Occupancy(this.game.bodies, FAT_CELL, this.options.fatRadius, 1.2);
+    this.territory = new Territory(this.game, this.fat);
+    this.memoCell = this.options.memoCell;
+    this.memoGrid = Math.ceil(ARENA / this.memoCell) + 1;
+    this.headings = this.options.memoHeadings;
+    this.memo = new Int32Array(this.memoGrid * this.memoGrid * this.headings);
     // Rollouts continue after the opponent dies: its trail stays, it stops moving.
     this.game.endsWhenOneLeft = false;
   }
 
   reset(): void {
     this.plan = [];
+    this.lastTurn = 0;
     this.planFrom = -1;
     this.lastTick = -1;
     this.knownBodies = 0;
@@ -233,6 +274,8 @@ export class Bot {
         if (oppTurn === this.oppTurn) likely = score;
       }
       let score = 0.5 * worst + 0.5 * likely;
+      if (turn === 0) score += this.options.straightBonus;
+      else if (this.lastTurn !== 0 && turn !== this.lastTurn) score -= this.options.reversalPenalty;
       let esc = 0;
       if (likely > DEAD + MAX_TICKS) {
         // Safety: a long collision-free continuation must exist after this manoeuvre.
@@ -254,6 +297,7 @@ export class Bot {
     this.lastScore = bestScore;
     this.lastEscape = bestEscape;
     this.lastTerritory = bestTerritory;
+    this.lastTurn = bestTurn;
     const plan: Turn[] = [];
     for (let i = 0; i < first; i++) plan.push(bestTurn);
     return plan;
@@ -301,7 +345,7 @@ export class Bot {
     if (!mine.alive) return DEAD + game.tick;
     if (!other.alive) return -DEAD - game.tick;
     this.syncGrids();
-    const t = this.territory.evaluate(me, opp);
+    const t = this.territory.evaluate(me, opp, this.options.oppSlack);
     // Free space left for me, in fine cells (1 unit² each); rewards hugging
     // walls and trails instead of wasting open space.
     const room = this.space.floodArea(me);
@@ -313,6 +357,13 @@ export class Bot {
       score += (t.reachMe - t.reachOpp) * 6;
     }
     score += room * 0.5;
+    if (!t.contested && this.options.hugBonus) {
+      // Dense filling: lanes next to existing trails or walls waste the least space.
+      const wall = Math.min(mine.x, mine.y, ARENA - mine.x, ARENA - mine.y) - 0.6;
+      const clearance = Math.min(wall, Math.sqrt(game.bodies.nearest2(mine.x, mine.y, 6)) - 1.2);
+      if (clearance >= 0.1 && clearance <= 1.0) score += this.options.hugBonus;
+      else if (clearance < 2.0) score += this.options.hugBonus * (2.0 - clearance);
+    }
     // Stay out of the opponent's immediate reach: within a few units a single
     // 16-tick manoeuvre of theirs can wall me in before I can turn away.
     const dx = other.x - mine.x;
@@ -370,7 +421,7 @@ export class Bot {
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= OPP_REACH && od + OPP_MARGIN < driven) {
+        if (od <= this.options.oppReach && od + OPP_MARGIN < driven) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
@@ -387,11 +438,13 @@ export class Bot {
         exhausted = true;
         return false;
       }
-      const cx = Math.min(MEMO_GRID - 1, Math.max(0, Math.floor(mine.x / MEMO_CELL)));
-      const cy = Math.min(MEMO_GRID - 1, Math.max(0, Math.floor(mine.y / MEMO_CELL)));
-      let h = Math.round((mine.angle / (2 * Math.PI)) * HEADINGS) % HEADINGS;
-      if (h < 0) h += HEADINGS;
-      const key = (cy * MEMO_GRID + cx) * HEADINGS + h;
+      const memoGrid = this.memoGrid;
+      const headings = this.headings;
+      const cx = Math.min(memoGrid - 1, Math.max(0, Math.floor(mine.x / this.memoCell)));
+      const cy = Math.min(memoGrid - 1, Math.max(0, Math.floor(mine.y / this.memoCell)));
+      let h = Math.round((mine.angle / (2 * Math.PI)) * headings) % headings;
+      if (h < 0) h += headings;
+      const key = (cy * memoGrid + cx) * headings + h;
       const seen = memo[key];
       if ((seen >>> 12) === stamp && (seen & 0xfff) >= remaining) {
         if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} pruned: memo ${seen & 0xfff}`);
@@ -401,7 +454,10 @@ export class Bot {
       const here = at + STRIDE * (depth + 1);
       game.save(stack, here);
       const ticks = Math.min(seg, remaining);
-      // Try the manoeuvres that end with the most clearance first.
+      // Order the manoeuvres by where they end: "open" tries the most
+      // clearance first, "lane" prefers staying about one lane away from the
+      // nearest obstacle, which finds long paths in half-filled regions.
+      const lane = this.options.dfsOrder === "lane";
       for (let i = 0; i < 3; i++) {
         const turn = TURNS[i];
         game.load(stack, here);
@@ -409,7 +465,9 @@ export class Bot {
           clearance[i] = -1;
           continue;
         }
-        clearance[i] = game.bodies.nearest2(mine.x, mine.y, 6) + Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y) ** 2;
+        const wall = Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y);
+        const gap = Math.min(Math.sqrt(game.bodies.nearest2(mine.x, mine.y, 6)) - 1.2, wall - 0.6);
+        clearance[i] = lane ? 10 - Math.abs(gap - 0.8) : gap;
       }
       for (let i = 0; i < 3; i++) order[i] = TURNS[i];
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);
