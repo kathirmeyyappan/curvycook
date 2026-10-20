@@ -552,7 +552,9 @@ var DEFAULT_OPTIONS = {
   dfsOrder: "open",
   oppReach: 32,
   momentum: 0,
-  fillMode: false
+  fillMode: false,
+  proximityRange: 14,
+  proximityWeight: 300
 };
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];
@@ -933,7 +935,8 @@ var Bot = class {
     const dx = other.x - mine.x;
     const dy = other.y - mine.y;
     const d = Math.sqrt(dx * dx + dy * dy);
-    if (d < 14) score -= (14 - d) * (14 - d) * 300;
+    const range = this.options.proximityRange;
+    if (d < range) score -= (range - d) * (range - d) * this.options.proximityWeight;
     return score;
   }
   /**

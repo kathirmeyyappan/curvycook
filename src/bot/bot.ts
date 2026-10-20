@@ -80,6 +80,9 @@ export interface BotOptions {
   momentum: number;
   /** Once the regions are separated, pick the move whose escape search survives longest (dense, dead-end-free filling). */
   fillMode: boolean;
+  /** Distance keeping: penalty weight × (range − distance)² while the opponent's head is closer than `range`. */
+  proximityRange: number;
+  proximityWeight: number;
 }
 
 export const DEFAULT_OPTIONS: BotOptions = {
@@ -99,6 +102,8 @@ export const DEFAULT_OPTIONS: BotOptions = {
   oppReach: 32,
   momentum: 0,
   fillMode: false,
+  proximityRange: 14,
+  proximityWeight: 300,
 };
 
 const TURNS: readonly Turn[] = [0, -1, 1];
@@ -526,7 +531,8 @@ export class Bot {
     const dx = other.x - mine.x;
     const dy = other.y - mine.y;
     const d = Math.sqrt(dx * dx + dy * dy);
-    if (d < 14) score -= (14 - d) * (14 - d) * 300;
+    const range = this.options.proximityRange;
+    if (d < range) score -= (range - d) * (range - d) * this.options.proximityWeight;
     return score;
   }
 
