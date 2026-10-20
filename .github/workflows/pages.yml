@@ -1,5 +1,5 @@
-# Builds the bot bundle and deploys docs/ to GitHub Pages. The first run
-# enables Pages for the repository (source: GitHub Actions) by itself.
+# Builds the bot bundle and deploys docs/ to GitHub Pages.
+# One-time setup by a repository admin: Settings → Pages → Source: "GitHub Actions".
 name: pages
 on:
   push:
