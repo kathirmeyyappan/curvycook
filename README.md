@@ -147,9 +147,8 @@ node scripts/e2e.mjs --rounds=2            # play rounds in headless Chromium ag
 
 The `pages` workflow (`.github/workflows/pages.yml`) builds the bot bundle,
 type-checks, and deploys `docs/` on every push to `main` or
-`kathir/curvycook-bot`, and on manual dispatch. One-time setup in the
-repository settings: Pages → Build and deployment → Source: "GitHub Actions".
-If the `github-pages` environment only allows the default branch, add the
+`kathir/curvycook-bot`, and on manual dispatch; its first run enables Pages
+for the repository (source: GitHub Actions). If the `github-pages` environment only allows the default branch, add the
 branch under Settings → Environments → github-pages → Deployment branches,
 or merge to `main`.
 
