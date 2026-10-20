@@ -106,11 +106,12 @@ checkpoint, both seat orders per seed, deterministic (greedy) checkpoint play.
 
 | Configuration | Seeds 0–15 (32 games) | Seeds 16–31 (32 games) | Overall |
 | --- | --- | --- | --- |
-| previous defaults (distance keeping range 14 / weight 300) | 26–6 | 15–17 | 41–23, 64% |
-| **shipped defaults** (range 18 / weight 200) | 22–10 | 20–12 | 42–22, 66% |
+| distance keeping range 14 / weight 300, opponent assumed straight | 26–6 | 15–17 | 41–23, 64% |
+| range 18 / weight 200, opponent assumed straight | 22–10 | 20–12 | 42–22, 66% |
+| **shipped**: range 18 / weight 200, opponent projected along walls | 21–11–1 | 20–11–2 | 41–22–3, 64% |
 | range 22 / weight 150 | – | 16–16 | – |
 
-One game in 160 was tied. The two seed batches differ by 20–30 points for every
+Ties are rare (3 in the shipped build's 64 games). The two seed batches differ by 20–30 points for every
 configuration tried, so differences of less than ~10 points between
 configurations are noise at this sample size.
 
