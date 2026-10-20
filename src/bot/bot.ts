@@ -19,7 +19,7 @@
  * Node (harness) and in the browser worker alike.
  */
 import { Game, Turn, WARMUP, MAX_TICKS, SPEED, ARENA, TURN } from "../engine/game.js";
-import { Occupancy, Territory, FAT_CELL, FAT_RADIUS, FINE_CELL, FINE_RADIUS } from "./territory.js";
+import { Occupancy, Territory, FAT_CELL, FAT_RADIUS, FINE_CELL, FINE_RADIUS, INF } from "./territory.js";
 
 export interface ObservedPlayer {
   x: number;
@@ -76,6 +76,10 @@ export interface BotOptions {
   dfsOrder: "open" | "lane";
   /** Space the opponent can reach within this many ticks is not mine to escape through if it gets there first. */
   oppReach: number;
+  /** Ticks both players are driven straight on from a leaf before the territory is judged (rewards long clean lines). */
+  momentum: number;
+  /** Once the regions are separated, pick the move whose escape search survives longest (dense, dead-end-free filling). */
+  fillMode: boolean;
 }
 
 export const DEFAULT_OPTIONS: BotOptions = {
@@ -93,11 +97,14 @@ export const DEFAULT_OPTIONS: BotOptions = {
   hugBonus: 0,
   dfsOrder: "open",
   oppReach: 32,
+  momentum: 0,
+  fillMode: false,
 };
 
 const TURNS: readonly Turn[] = [0, -1, 1];
 const PRINT_ALL = [true, true];
 const DEAD = -1e9;
+const DEAD_MOVE = -1e9; // clearance marker for a manoeuvre that dies
 const STRIDE = Game.SAVE_STRIDE;
 const MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
 /**
@@ -119,6 +126,9 @@ export class Bot {
   private readonly memoCell: number;
   private readonly headings: number;
   private lastTurn: Turn = 0;
+  /** Fill mode: the per-tick turns of a verified long continuation, from `fillFrom`. */
+  private fillPath: Turn[] = [];
+  private fillFrom = -1;
   private plan: Turn[] = [];
   private planFrom = -1;
   private lastTick = -1;
@@ -126,7 +136,7 @@ export class Bot {
   /** The opponent's angles over the last few ticks, to estimate its current turn. */
   private readonly oppAngles: number[] = [];
   private oppTurn: Turn = 0;
-  private readonly stack = new Float64Array(STRIDE * 256);
+  private readonly stack = new Float64Array(STRIDE * 256); // search depth < 200; slots 200/201 are evaluation scratch
   private readonly turns: Turn[] = [0, 0];
   private readonly memo: Int32Array;
   private readonly dfsOrders: Turn[][] = Array.from({ length: 128 }, () => [0, -1, 1] as Turn[]);
@@ -160,6 +170,8 @@ export class Bot {
 
   reset(): void {
     this.plan = [];
+    this.fillPath = [];
+    this.fillFrom = -1;
     this.lastTurn = 0;
     this.planFrom = -1;
     this.lastTick = -1;
@@ -244,6 +256,51 @@ export class Bot {
 
   // ---------------------------------------------------------------- search
 
+  /**
+   * The next `first` turns of the committed fill path, if it still exists,
+   * covers the current tick, keeps the bot alive to its end (re-simulated
+   * against the current trails) and has a useful length left.
+   */
+  private committedPlan(first: number): Turn[] | null {
+    const game = this.game;
+    const offset = game.tick - this.fillFrom;
+    if (this.fillFrom < 0 || offset < 0 || offset + first > this.fillPath.length) return null;
+    const remaining = this.fillPath.length - offset;
+    if (remaining < 96) return null; // nearly consumed: search again
+    const stack = this.stack;
+    game.save(stack, 0);
+    const turns = this.turns;
+    turns[1 - this.me] = 0;
+    const mine = game.players[this.me];
+    let ok = true;
+    for (let i = offset; i < this.fillPath.length; i++) {
+      turns[this.me] = this.fillPath[i];
+      game.step(turns, PRINT_ALL);
+      if (!mine.alive) {
+        ok = false;
+        break;
+      }
+      if (game.done) break;
+    }
+    game.load(stack, 0);
+    this.syncGrids();
+    if (!ok) {
+      this.fillPath = [];
+      this.fillFrom = -1;
+      return null;
+    }
+    return this.fillPath.slice(offset, offset + first);
+  }
+
+  /** True when the opponent's head cannot reach my region any more (fine grid). */
+  private separated(): boolean {
+    const other = this.game.players[1 - this.me];
+    if (!other.alive) return true;
+    this.syncGrids();
+    this.space.fill(this.me);
+    return this.space.dist[this.me][this.fine.cellOf(other.x, other.y)] === INF;
+  }
+
   private search(): Turn[] {
     const game = this.game;
     const { segment, escape } = this.options;
@@ -258,6 +315,61 @@ export class Bot {
     let bestEscape = 0;
     let bestTerritory = 0;
     if (this.debug) this.trace = [];
+    if (this.options.fillMode && this.separated()) {
+      // Filling: nothing the opponent does matters any more. Follow the
+      // committed long continuation while it stays valid; otherwise search
+      // for the move that survives longest (ties: most room, hug the walls).
+      const committed = this.committedPlan(first);
+      if (committed) {
+        this.lastScore = this.options.escape * 100;
+        this.lastEscape = this.options.escape;
+        this.lastTurn = committed[0];
+        return committed;
+      }
+      let bestPath: Turn[] = [];
+      for (const turn of TURNS) {
+        game.load(stack, 0);
+        let score: number;
+        let esc = 0;
+        let path: Turn[] = [];
+        if (!this.drive(turn, 0, first)) score = DEAD + game.tick;
+        else {
+          esc = this.escape(STRIDE);
+          path = this.bestPath.slice();
+          game.load(stack, 0);
+          this.drive(turn, 0, first);
+          score = esc * 100 + this.staticScore();
+          if (turn === 0) score += this.options.straightBonus;
+          else if (this.lastTurn !== 0 && turn !== this.lastTurn) score -= this.options.reversalPenalty;
+        }
+        if (this.debug) this.trace.push({ turn, worst: score, likely: score, escape: esc, path: path.slice(), nodes: this.lastNodes, endArea: this.lastEndArea });
+        if (score > bestScore) {
+          bestScore = score;
+          bestTurn = turn;
+          bestEscape = esc;
+          bestTerritory = score;
+          bestPath = path;
+        }
+      }
+      game.load(stack, 0);
+      this.syncGrids();
+      this.lastScore = bestScore;
+      this.lastEscape = bestEscape;
+      this.lastTerritory = bestTerritory;
+      this.lastTurn = bestTurn;
+      const plan: Turn[] = [];
+      for (let i = 0; i < first; i++) plan.push(bestTurn);
+      if (bestEscape >= this.options.escape) {
+        // Commit: first segment, then the search's segments (8 ticks each).
+        this.fillPath = plan.slice();
+        for (const t of bestPath) for (let i = 0; i < segment; i++) this.fillPath.push(t);
+        this.fillFrom = game.tick;
+      } else {
+        this.fillPath = [];
+        this.fillFrom = -1;
+      }
+      return plan;
+    }
     for (const turn of TURNS) {
       // Tactics: the opponent commits to one manoeuvre for a whole 16-tick
       // window (that is how its controller works), so each of its options is
@@ -344,6 +456,51 @@ export class Bot {
     const other = game.players[opp];
     if (!mine.alive) return DEAD + game.tick;
     if (!other.alive) return -DEAD - game.tick;
+    const momentum = this.options.momentum;
+    if (momentum > 0) {
+      // Judge the position a little further down the road: both keep going
+      // straight (stopping each one just before it would die).
+      const at = STRIDE * 200;
+      game.save(this.stack, at);
+      const score = this.momentumScore(momentum);
+      game.load(this.stack, at);
+      return score;
+    }
+    return this.staticScore();
+  }
+
+  private momentumScore(ticks: number): number {
+    const game = this.game;
+    const me = this.me;
+    const opp = 1 - me;
+    const mine = game.players[me];
+    const other = game.players[opp];
+    const turns = this.turns;
+    turns[0] = 0;
+    turns[1] = 0;
+    const probe = this.stack;
+    const at = STRIDE * 201;
+    for (let t = 0; t < ticks; t++) {
+      game.save(probe, at);
+      const aliveMe = mine.alive;
+      const aliveOpp = other.alive;
+      game.step(turns, PRINT_ALL);
+      if (mine.alive !== aliveMe || other.alive !== aliveOpp || game.done) {
+        // Someone would die here: evaluate the last safe state instead.
+        game.load(probe, at);
+        break;
+      }
+    }
+    return this.staticScore();
+  }
+
+  /** Territory, room and distance terms for the current engine state. */
+  private staticScore(): number {
+    const game = this.game;
+    const me = this.me;
+    const opp = 1 - me;
+    const mine = game.players[me];
+    const other = game.players[opp];
     this.syncGrids();
     const t = this.territory.evaluate(me, opp, this.options.oppSlack);
     // Free space left for me, in fine cells (1 unit² each); rewards hugging
@@ -397,11 +554,9 @@ export class Bot {
     let nodes = 0;
     let exhausted = false;
     const debug = this.debug;
-    if (debug) {
-      this.curPath.length = 0;
-      this.bestPath.length = 0;
-      this.lastEndArea = -1;
-    }
+    this.curPath.length = 0;
+    this.bestPath.length = 0;
+    this.lastEndArea = -1;
     game.save(stack, at);
     // Space the opponent can reach before me is not mine to escape through:
     // it can wall it off within one of its manoeuvre windows.
@@ -417,7 +572,7 @@ export class Bot {
       const driven = horizon - remaining;
       if (driven > best) {
         best = driven;
-        if (debug) this.bestPath = this.curPath.slice();
+        this.bestPath = this.curPath.slice();
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
@@ -462,7 +617,7 @@ export class Bot {
         const turn = TURNS[i];
         game.load(stack, here);
         if (!this.drive(turn, 0, ticks)) {
-          clearance[i] = -1;
+          clearance[i] = DEAD_MOVE;
           continue;
         }
         const wall = Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y);
@@ -473,26 +628,24 @@ export class Bot {
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);
       if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} clearance S/R/L ${Array.from(clearance).map((c) => c.toFixed(1)).join("/")} order ${order.join(",")}`);
       for (const turn of order) {
-        if (clearance[TURNS.indexOf(turn)] < 0) continue;
+        if (clearance[TURNS.indexOf(turn)] === DEAD_MOVE) continue;
         game.load(stack, here);
-        if (debug) this.curPath.push(turn);
+        this.curPath.push(turn);
         this.drive(turn, 0, ticks);
         if (game.done) {
           best = horizon; // survived to the tick cap
-          if (debug) this.bestPath = this.curPath.slice();
+          this.bestPath = this.curPath.slice();
           return true;
         }
         if (dfs(remaining - ticks, depth + 1)) return true;
-        if (debug) this.curPath.pop();
+        this.curPath.pop();
         if (exhausted) return false;
       }
       return false;
     };
     const ok = dfs(horizon, 0);
-    if (debug) {
-      this.lastNodes = nodes;
-      if (ok) this.bestPath = this.curPath.slice();
-    }
+    this.lastNodes = nodes;
+    if (ok) this.bestPath = this.curPath.slice();
     if (exhausted) this.escapeBudgetHits++;
     game.load(stack, at);
     this.syncGrids();

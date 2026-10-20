@@ -550,11 +550,14 @@ var DEFAULT_OPTIONS = {
   oppSlack: 1,
   hugBonus: 0,
   dfsOrder: "open",
-  oppReach: 32
+  oppReach: 32,
+  momentum: 0,
+  fillMode: false
 };
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];
 var DEAD = -1e9;
+var DEAD_MOVE = -1e9;
 var STRIDE = Game.SAVE_STRIDE;
 var MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
 var OPP_MARGIN = 8;
@@ -580,6 +583,9 @@ var Bot = class {
   memoCell;
   headings;
   lastTurn = 0;
+  /** Fill mode: the per-tick turns of a verified long continuation, from `fillFrom`. */
+  fillPath = [];
+  fillFrom = -1;
   plan = [];
   planFrom = -1;
   lastTick = -1;
@@ -588,6 +594,7 @@ var Bot = class {
   oppAngles = [];
   oppTurn = 0;
   stack = new Float64Array(STRIDE * 256);
+  // search depth < 200; slots 200/201 are evaluation scratch
   turns = [0, 0];
   memo;
   dfsOrders = Array.from({ length: 128 }, () => [0, -1, 1]);
@@ -608,6 +615,8 @@ var Bot = class {
   lastEndArea = 0;
   reset() {
     this.plan = [];
+    this.fillPath = [];
+    this.fillFrom = -1;
     this.lastTurn = 0;
     this.planFrom = -1;
     this.lastTick = -1;
@@ -683,6 +692,49 @@ var Bot = class {
     this.lastTick = obs.tick;
   }
   // ---------------------------------------------------------------- search
+  /**
+   * The next `first` turns of the committed fill path, if it still exists,
+   * covers the current tick, keeps the bot alive to its end (re-simulated
+   * against the current trails) and has a useful length left.
+   */
+  committedPlan(first) {
+    const game = this.game;
+    const offset = game.tick - this.fillFrom;
+    if (this.fillFrom < 0 || offset < 0 || offset + first > this.fillPath.length) return null;
+    const remaining = this.fillPath.length - offset;
+    if (remaining < 96) return null;
+    const stack = this.stack;
+    game.save(stack, 0);
+    const turns = this.turns;
+    turns[1 - this.me] = 0;
+    const mine = game.players[this.me];
+    let ok = true;
+    for (let i = offset; i < this.fillPath.length; i++) {
+      turns[this.me] = this.fillPath[i];
+      game.step(turns, PRINT_ALL);
+      if (!mine.alive) {
+        ok = false;
+        break;
+      }
+      if (game.done) break;
+    }
+    game.load(stack, 0);
+    this.syncGrids();
+    if (!ok) {
+      this.fillPath = [];
+      this.fillFrom = -1;
+      return null;
+    }
+    return this.fillPath.slice(offset, offset + first);
+  }
+  /** True when the opponent's head cannot reach my region any more (fine grid). */
+  separated() {
+    const other = this.game.players[1 - this.me];
+    if (!other.alive) return true;
+    this.syncGrids();
+    this.space.fill(this.me);
+    return this.space.dist[this.me][this.fine.cellOf(other.x, other.y)] === INF;
+  }
   search() {
     const game = this.game;
     const { segment, escape } = this.options;
@@ -694,6 +746,57 @@ var Bot = class {
     let bestEscape = 0;
     let bestTerritory = 0;
     if (this.debug) this.trace = [];
+    if (this.options.fillMode && this.separated()) {
+      const committed = this.committedPlan(first);
+      if (committed) {
+        this.lastScore = this.options.escape * 100;
+        this.lastEscape = this.options.escape;
+        this.lastTurn = committed[0];
+        return committed;
+      }
+      let bestPath = [];
+      for (const turn of TURNS) {
+        game.load(stack, 0);
+        let score;
+        let esc = 0;
+        let path = [];
+        if (!this.drive(turn, 0, first)) score = DEAD + game.tick;
+        else {
+          esc = this.escape(STRIDE);
+          path = this.bestPath.slice();
+          game.load(stack, 0);
+          this.drive(turn, 0, first);
+          score = esc * 100 + this.staticScore();
+          if (turn === 0) score += this.options.straightBonus;
+          else if (this.lastTurn !== 0 && turn !== this.lastTurn) score -= this.options.reversalPenalty;
+        }
+        if (this.debug) this.trace.push({ turn, worst: score, likely: score, escape: esc, path: path.slice(), nodes: this.lastNodes, endArea: this.lastEndArea });
+        if (score > bestScore) {
+          bestScore = score;
+          bestTurn = turn;
+          bestEscape = esc;
+          bestTerritory = score;
+          bestPath = path;
+        }
+      }
+      game.load(stack, 0);
+      this.syncGrids();
+      this.lastScore = bestScore;
+      this.lastEscape = bestEscape;
+      this.lastTerritory = bestTerritory;
+      this.lastTurn = bestTurn;
+      const plan2 = [];
+      for (let i = 0; i < first; i++) plan2.push(bestTurn);
+      if (bestEscape >= this.options.escape) {
+        this.fillPath = plan2.slice();
+        for (const t of bestPath) for (let i = 0; i < segment; i++) this.fillPath.push(t);
+        this.fillFrom = game.tick;
+      } else {
+        this.fillPath = [];
+        this.fillFrom = -1;
+      }
+      return plan2;
+    }
     for (const turn of TURNS) {
       let worst = Infinity;
       let likely = 0;
@@ -771,6 +874,46 @@ var Bot = class {
     const other = game.players[opp];
     if (!mine.alive) return DEAD + game.tick;
     if (!other.alive) return -DEAD - game.tick;
+    const momentum = this.options.momentum;
+    if (momentum > 0) {
+      const at = STRIDE * 200;
+      game.save(this.stack, at);
+      const score = this.momentumScore(momentum);
+      game.load(this.stack, at);
+      return score;
+    }
+    return this.staticScore();
+  }
+  momentumScore(ticks) {
+    const game = this.game;
+    const me = this.me;
+    const opp = 1 - me;
+    const mine = game.players[me];
+    const other = game.players[opp];
+    const turns = this.turns;
+    turns[0] = 0;
+    turns[1] = 0;
+    const probe = this.stack;
+    const at = STRIDE * 201;
+    for (let t = 0; t < ticks; t++) {
+      game.save(probe, at);
+      const aliveMe = mine.alive;
+      const aliveOpp = other.alive;
+      game.step(turns, PRINT_ALL);
+      if (mine.alive !== aliveMe || other.alive !== aliveOpp || game.done) {
+        game.load(probe, at);
+        break;
+      }
+    }
+    return this.staticScore();
+  }
+  /** Territory, room and distance terms for the current engine state. */
+  staticScore() {
+    const game = this.game;
+    const me = this.me;
+    const opp = 1 - me;
+    const mine = game.players[me];
+    const other = game.players[opp];
     this.syncGrids();
     const t = this.territory.evaluate(me, opp, this.options.oppSlack);
     const room = this.space.floodArea(me);
@@ -817,11 +960,9 @@ var Bot = class {
     let nodes = 0;
     let exhausted = false;
     const debug = this.debug;
-    if (debug) {
-      this.curPath.length = 0;
-      this.bestPath.length = 0;
-      this.lastEndArea = -1;
-    }
+    this.curPath.length = 0;
+    this.bestPath.length = 0;
+    this.lastEndArea = -1;
     game.save(stack, at);
     this.fat.sync();
     const oppDist = other.alive ? this.territory.fill(opp) && this.territory.dist[opp] : null;
@@ -834,7 +975,7 @@ var Bot = class {
       const driven = horizon - remaining;
       if (driven > best) {
         best = driven;
-        if (debug) this.bestPath = this.curPath.slice();
+        this.bestPath = this.curPath.slice();
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
@@ -874,7 +1015,7 @@ var Bot = class {
         const turn = TURNS[i];
         game.load(stack, here);
         if (!this.drive(turn, 0, ticks)) {
-          clearance[i] = -1;
+          clearance[i] = DEAD_MOVE;
           continue;
         }
         const wall = Math.min(6, mine.x, mine.y, ARENA - mine.x, ARENA - mine.y);
@@ -885,26 +1026,24 @@ var Bot = class {
       order.sort((a, b) => clearance[TURNS.indexOf(b)] - clearance[TURNS.indexOf(a)]);
       if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) h${h} clearance S/R/L ${Array.from(clearance).map((c) => c.toFixed(1)).join("/")} order ${order.join(",")}`);
       for (const turn of order) {
-        if (clearance[TURNS.indexOf(turn)] < 0) continue;
+        if (clearance[TURNS.indexOf(turn)] === DEAD_MOVE) continue;
         game.load(stack, here);
-        if (debug) this.curPath.push(turn);
+        this.curPath.push(turn);
         this.drive(turn, 0, ticks);
         if (game.done) {
           best = horizon;
-          if (debug) this.bestPath = this.curPath.slice();
+          this.bestPath = this.curPath.slice();
           return true;
         }
         if (dfs(remaining - ticks, depth + 1)) return true;
-        if (debug) this.curPath.pop();
+        this.curPath.pop();
         if (exhausted) return false;
       }
       return false;
     };
     const ok = dfs(horizon, 0);
-    if (debug) {
-      this.lastNodes = nodes;
-      if (ok) this.bestPath = this.curPath.slice();
-    }
+    this.lastNodes = nodes;
+    if (ok) this.bestPath = this.curPath.slice();
     if (exhausted) this.escapeBudgetHits++;
     game.load(stack, at);
     this.syncGrids();
