@@ -7355,6 +7355,7 @@ function handleServerMessage(e9) {
     lastWinner = m3.winner;
     scoreRound(m3.winner);
     showEnd(m3.winner, m3.ticks, m3.outcome, matchFinished);
+    if (m3.seed !== void 0) endDetail.append(` Seed ${m3.seed}.`);
   }
 }
 function applyReady() {

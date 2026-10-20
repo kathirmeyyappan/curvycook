@@ -478,7 +478,7 @@ async function run(config2) {
   const frame = await game.run(controls, emit, config2.tick_hz);
   if (!running || !frame?.done) return;
   running = false;
-  postMessage({ type: "end", ...outcome(frame), ticks: frame.tick, players: frame.players });
+  postMessage({ type: "end", ...outcome(frame), ticks: frame.tick, players: frame.players, seed: (configuredSeed - 1n).toString() });
   postMessage({ type: "local_ready" });
 }
 var config;

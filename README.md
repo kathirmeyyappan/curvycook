@@ -87,6 +87,11 @@ Every 4 ticks (`src/bot/bot.ts`):
    that must find a 640-tick collision-free continuation ending in open space
    and using only space the bot reaches before the opponent could within the
    opponent's next two windows. Moves without one are heavily penalised.
+   In these rollouts the opponent follows a projection computed at plan time
+   the way the checkpoint actually drives: straight until a wall or trail is
+   ahead, then turning along it. A lap along a wall that would seal the bot
+   into a pocket therefore shows up in the search instead of being missed
+   because the opponent was assumed to stop at the first wall.
 
 It is deterministic, takes 15–35 ms per plan in Node (up to ~250 ms in the
 worst positions), and runs in real time in the browser worker.
@@ -159,3 +164,11 @@ Source "Deploy from a branch", folder `/docs` (the built bundle is committed).
 
 The page opens on Curvycook (the bot) vs Shai Hulud (the checkpoint). Use the
 player search to add "You" to play either of them with the arrow keys.
+
+Every round's end screen shows its seed, and `?seed=N` in the URL starts the
+first round from seed N (later rounds use N+1, N+2, ...). The browser and the
+Node harness play identical games for the same seed, so a round that looks
+wrong can be reproduced and inspected with
+`npm run match -- --seeds=N --p0=bot --p1=model --record=/tmp/r` followed by
+`node scripts/render.mjs /tmp/r/*.json`, `node scripts/doomed.mjs /tmp/r` and
+`npx tsx scripts/debug/replay.mts /tmp/r/seedN-bot-vs-model.json TICK --map`.

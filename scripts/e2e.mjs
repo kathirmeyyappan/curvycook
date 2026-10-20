@@ -81,7 +81,8 @@ for (let round = 1; round <= rounds; round++) {
   const title = await page.$eval("#end-title", (e) => e.textContent.trim().replace(/\s+/g, " "));
   const detail = await page.$eval("#end-detail", (e) => e.textContent.trim().replace(/\s+/g, " "));
   const ticks = Number(/(\d+) ticks/.exec(detail)?.[1] ?? 0);
-  console.log(`round ${round}: ${title} after ${ticks} ticks in ${elapsed.toFixed(1)}s wall time (${(ticks / elapsed).toFixed(0)} ticks/s; real time is 60)`);
+  const shownSeed = /Seed (\d+)/.exec(detail)?.[1] ?? "?";
+  console.log(`round ${round}: ${title} after ${ticks} ticks in ${elapsed.toFixed(1)}s wall time (${(ticks / elapsed).toFixed(0)} ticks/s; real time is 60), seed ${shownSeed}`);
   if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, `-${round}.png`) });
   await page.waitForTimeout(500);
 }

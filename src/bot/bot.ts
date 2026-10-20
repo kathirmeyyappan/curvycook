@@ -108,6 +108,11 @@ export const DEFAULT_OPTIONS: BotOptions = {
 
 const TURNS: readonly Turn[] = [0, -1, 1];
 const PRINT_ALL = [true, true];
+/** Opponent move sentinel for rollouts: follow the wall-following projection computed at plan time. */
+const PROJECTED = 2;
+type OppMove = Turn | typeof PROJECTED;
+/** Ticks of opponent projection computed per plan (covers the escape horizon). */
+const PROJECTION_TICKS = 704;
 const DEAD = -1e9;
 const DEAD_MOVE = -1e9; // clearance marker for a manoeuvre that dies
 const STRIDE = Game.SAVE_STRIDE;
@@ -141,7 +146,11 @@ export class Bot {
   /** The opponent's angles over the last few ticks, to estimate its current turn. */
   private readonly oppAngles: number[] = [];
   private oppTurn: Turn = 0;
-  private readonly stack = new Float64Array(STRIDE * 256); // search depth < 200; slots 200/201 are evaluation scratch
+  /** Projected opponent turns per tick from `oppPlanFrom` (the checkpoint laps along walls). */
+  private readonly oppPlan = new Int8Array(PROJECTION_TICKS);
+  private oppPlanFrom = -1;
+  private oppPlanLen = 0;
+  private readonly stack = new Float64Array(STRIDE * 256); // search depth < 200; slots 200-203 are scratch
   private readonly turns: Turn[] = [0, 0];
   private readonly memo: Int32Array;
   private readonly dfsOrders: Turn[][] = Array.from({ length: 128 }, () => [0, -1, 1] as Turn[]);
@@ -274,14 +283,9 @@ export class Bot {
     if (remaining < 96) return null; // nearly consumed: search again
     const stack = this.stack;
     game.save(stack, 0);
-    const turns = this.turns;
-    turns[1 - this.me] = 0;
-    const mine = game.players[this.me];
     let ok = true;
     for (let i = offset; i < this.fillPath.length; i++) {
-      turns[this.me] = this.fillPath[i];
-      game.step(turns, PRINT_ALL);
-      if (!mine.alive) {
+      if (!this.drive(this.fillPath[i], PROJECTED, 1)) {
         ok = false;
         break;
       }
@@ -314,6 +318,8 @@ export class Bot {
     // the first segment is shortened so that every continuation the escape
     // search verifies now is still representable at the next re-plan.
     const first = segment - (game.tick % segment);
+    this.projectOpponent();
+    this.syncGrids();
     game.save(stack, 0);
     let bestTurn: Turn = 0;
     let bestScore = -Infinity;
@@ -337,12 +343,12 @@ export class Bot {
         let score: number;
         let esc = 0;
         let path: Turn[] = [];
-        if (!this.drive(turn, 0, first)) score = DEAD + game.tick;
+        if (!this.drive(turn, PROJECTED, first)) score = DEAD + game.tick;
         else {
           esc = this.escape(STRIDE);
           path = this.bestPath.slice();
           game.load(stack, 0);
-          this.drive(turn, 0, first);
+          this.drive(turn, PROJECTED, first);
           score = esc * 100 + this.staticScore();
           if (turn === 0) score += this.options.straightBonus;
           else if (this.lastTurn !== 0 && turn !== this.lastTurn) score -= this.options.reversalPenalty;
@@ -397,7 +403,7 @@ export class Bot {
       if (likely > DEAD + MAX_TICKS) {
         // Safety: a long collision-free continuation must exist after this manoeuvre.
         game.load(stack, 0);
-        this.drive(turn, 0, first);
+        this.drive(turn, PROJECTED, first);
         esc = this.escape(STRIDE);
         if (esc < escape) score -= 20000 + (escape - esc) * 40;
       }
@@ -420,19 +426,87 @@ export class Bot {
     return plan;
   }
 
-  /** Drive `ticks` ticks with fixed turns; false if I die. */
-  private drive(myTurn: Turn, oppTurn: Turn, ticks: number): boolean {
+  /**
+   * Drive `ticks` ticks with my turn fixed; the opponent holds `oppMove`, or
+   * follows the plan-time projection when it is PROJECTED. False if I die.
+   */
+  private drive(myTurn: Turn, oppMove: OppMove, ticks: number): boolean {
     const game = this.game;
     const turns = this.turns;
-    turns[this.me] = myTurn;
-    turns[1 - this.me] = oppTurn;
-    const mine = game.players[this.me];
+    const me = this.me;
+    const opp = 1 - me;
+    turns[me] = myTurn;
+    const mine = game.players[me];
+    const projected = oppMove === PROJECTED;
+    if (!projected) turns[opp] = oppMove;
     for (let t = 0; t < ticks; t++) {
+      if (projected) {
+        const i = game.tick - this.oppPlanFrom;
+        turns[opp] = i >= 0 && i < this.oppPlanLen ? (this.oppPlan[i] as Turn) : 0;
+      }
       game.step(turns, PRINT_ALL);
       if (!mine.alive) return false;
       if (game.done) return true; // tick cap reached alive
     }
     return true;
+  }
+
+  /**
+   * Project the opponent for PROJECTION_TICKS ticks from the current state,
+   * the way the checkpoint actually drives: straight until a wall or trail is
+   * ahead, then turning along it. My head is frozen meanwhile. The projection
+   * is what rollouts use for the opponent beyond its current manoeuvre, so a
+   * lap that would seal off my region shows up in the escape search.
+   */
+  private projectOpponent(): void {
+    const game = this.game;
+    const me = this.me;
+    const opp = 1 - me;
+    const other = game.players[opp];
+    const mine = game.players[me];
+    const stack = this.stack;
+    const base = STRIDE * 202;
+    const probe = STRIDE * 203;
+    this.oppPlanFrom = game.tick;
+    this.oppPlanLen = 0;
+    if (!other.alive) return;
+    game.save(stack, base);
+    mine.alive = false; // frozen: dead players neither move nor lay trail
+    const turns = this.turns;
+    turns[me] = 0;
+    const DECIDE = 16;
+    const LOOK = 32;
+    const survives = (turn: Turn): boolean => {
+      game.save(stack, probe);
+      turns[opp] = turn;
+      let ok = true;
+      for (let t = 0; t < LOOK; t++) {
+        game.step(turns, PRINT_ALL);
+        if (!other.alive) {
+          ok = false;
+          break;
+        }
+      }
+      game.load(stack, probe);
+      return ok;
+    };
+    let turn: Turn = 0;
+    for (let t = 0; t < PROJECTION_TICKS; t++) {
+      if (t % DECIDE === 0) {
+        turn = 0;
+        if (!survives(0)) {
+          const first: Turn = this.oppTurn !== 0 ? this.oppTurn : 1;
+          const second: Turn = first === 1 ? -1 : 1;
+          turn = survives(first) ? first : survives(second) ? second : 0;
+        }
+      }
+      turns[opp] = turn;
+      game.step(turns, PRINT_ALL);
+      if (!other.alive) break;
+      this.oppPlan[t] = turn;
+      this.oppPlanLen = t + 1;
+    }
+    game.load(stack, base);
   }
 
   /** Best tactical score over my second segment (opponent holds `oppTurn`). */
@@ -489,6 +563,8 @@ export class Bot {
       game.save(probe, at);
       const aliveMe = mine.alive;
       const aliveOpp = other.alive;
+      const i = game.tick - this.oppPlanFrom;
+      turns[opp] = i >= 0 && i < this.oppPlanLen ? (this.oppPlan[i] as Turn) : 0;
       game.step(turns, PRINT_ALL);
       if (mine.alive !== aliveMe || other.alive !== aliveOpp || game.done) {
         // Someone would die here: evaluate the last safe state instead.
@@ -622,7 +698,7 @@ export class Bot {
       for (let i = 0; i < 3; i++) {
         const turn = TURNS[i];
         game.load(stack, here);
-        if (!this.drive(turn, 0, ticks)) {
+        if (!this.drive(turn, PROJECTED, ticks)) {
           clearance[i] = DEAD_MOVE;
           continue;
         }
@@ -637,7 +713,7 @@ export class Bot {
         if (clearance[TURNS.indexOf(turn)] === DEAD_MOVE) continue;
         game.load(stack, here);
         this.curPath.push(turn);
-        this.drive(turn, 0, ticks);
+        this.drive(turn, PROJECTED, ticks);
         if (game.done) {
           best = horizon; // survived to the tick cap
           this.bestPath = this.curPath.slice();
