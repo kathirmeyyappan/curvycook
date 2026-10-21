@@ -657,8 +657,31 @@ export class Bot {
     // Space the opponent can reach before me is not mine to escape through:
     // it can wall it off within one of its manoeuvre windows.
     this.fat.sync();
-    const oppDist = other.alive ? this.territory.fill(opp) && this.territory.dist[opp] : null;
+    const oppDist: Int32Array | null = other.alive && this.territory.fill(opp) ? this.territory.dist[opp] : null;
     const fat = this.fat;
+    const g = fat.grid;
+    // My head may sit in a cell the grid excludes (the lane along a wall or
+    // along a trail): the opponent's reach there is that of the nearest cell.
+    const oppReachAt = (x: number, y: number): number => {
+      const c = fat.cellOf(x, y);
+      const cx = c % g;
+      const cy = (c - cx) / g;
+      let od = oppDist![c];
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= g) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = cx + dx;
+          if (nx < 0 || nx >= g) continue;
+          const d = oppDist![ny * g + nx];
+          if (d < od) od = d;
+        }
+      }
+      return od;
+    };
+    // Ticks already driven since plan time (the first manoeuvre), so that my
+    // arrival times compare with the opponent's plan-time reach.
+    const offset = Math.max(0, game.tick - this.oppPlanFrom);
     // Per-depth scratch space: a child call must not clobber its parent's loop.
     const orders = this.dfsOrders;
     const clearances = this.dfsClearances;
@@ -671,8 +694,9 @@ export class Bot {
         this.bestPath = this.curPath.slice();
       }
       if (oppDist && driven > 0) {
-        const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if ((od <= this.options.oppReach || driven <= this.options.selfReach) && od + OPP_MARGIN < driven) {
+        const od = oppReachAt(mine.x, mine.y);
+        const arrival = driven + offset;
+        if ((od <= this.options.oppReach || arrival <= this.options.selfReach) && od + OPP_MARGIN < arrival) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
