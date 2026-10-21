@@ -551,10 +551,14 @@ var DEFAULT_OPTIONS = {
   hugBonus: 0,
   dfsOrder: "open",
   oppReach: 32,
+  selfReach: 160,
+  oppMargin: 16,
   momentum: 0,
   fillMode: false,
   proximityRange: 18,
-  proximityWeight: 200
+  proximityWeight: 0,
+  huntWeight: 0,
+  huntAhead: 0
 };
 var TURNS = [0, -1, 1];
 var PRINT_ALL = [true, true];
@@ -564,7 +568,6 @@ var DEAD = -1e9;
 var DEAD_MOVE = -1e9;
 var STRIDE = Game.SAVE_STRIDE;
 var MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
-var OPP_MARGIN = 8;
 var Bot = class {
   constructor(me, options = {}) {
     this.me = me;
@@ -1009,6 +1012,11 @@ var Bot = class {
     const d = Math.sqrt(dx * dx + dy * dy);
     const range = this.options.proximityRange;
     if (d < range) score -= (range - d) * (range - d) * this.options.proximityWeight;
+    if (this.options.huntWeight) {
+      const tx = other.x + this.options.huntAhead * Math.cos(other.angle);
+      const ty = other.y + this.options.huntAhead * Math.sin(other.angle);
+      score -= Math.sqrt((tx - mine.x) * (tx - mine.x) + (ty - mine.y) * (ty - mine.y)) * this.options.huntWeight;
+    }
     return score;
   }
   /**
@@ -1040,8 +1048,27 @@ var Bot = class {
     this.lastEndArea = -1;
     game.save(stack, at);
     this.fat.sync();
-    const oppDist = other.alive ? this.territory.fill(opp) && this.territory.dist[opp] : null;
+    const oppDist = other.alive && this.territory.fill(opp) ? this.territory.dist[opp] : null;
     const fat = this.fat;
+    const g = fat.grid;
+    const oppReachAt = (x, y) => {
+      const c = fat.cellOf(x, y);
+      const cx = c % g;
+      const cy = (c - cx) / g;
+      let od = oppDist[c];
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= g) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = cx + dx;
+          if (nx < 0 || nx >= g) continue;
+          const d = oppDist[ny * g + nx];
+          if (d < od) od = d;
+        }
+      }
+      return od;
+    };
+    const offset = Math.max(0, game.tick - this.oppPlanFrom);
     const orders = this.dfsOrders;
     const clearances = this.dfsClearances;
     const dfs = (remaining, depth) => {
@@ -1053,8 +1080,9 @@ var Bot = class {
         this.bestPath = this.curPath.slice();
       }
       if (oppDist && driven > 0) {
-        const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= this.options.oppReach && od + OPP_MARGIN < driven) {
+        const od = oppReachAt(mine.x, mine.y);
+        const arrival = driven + offset;
+        if ((od <= this.options.oppReach || arrival <= this.options.selfReach) && od + this.options.oppMargin < arrival) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
