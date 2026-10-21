@@ -132,7 +132,7 @@ opponent's head instead of playing territory). Seeds 0–7, both seat orders:
 | Bot | vs hunter (aims 24 ahead) | vs hunter (12 ahead) | vs chaser (0 ahead) |
 | --- | --- | --- | --- |
 | first release (distance keeping) | 0–15–1 | 3–13 | 6–9–1 |
-| **shipped** | 9–7 | 9–7 | 13–3 |
+| **shipped** | 9–7 (and 7–9 on seeds 8–15) | 9–7 | 13–3 |
 
 Distance keeping was the problem: fleeing a same-speed opponent means running
 straight into a wall and then along it with the hunter parallel on the
