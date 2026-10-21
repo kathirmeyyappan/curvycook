@@ -78,6 +78,8 @@ export interface BotOptions {
   oppReach: number;
   /** The first this many ticks of an escape path may only use space I reach before the opponent could (a cut-off would seal anything else). */
   selfReach: number;
+  /** Ticks of head start the opponent needs on a cell before the reach rules count it as its space. */
+  oppMargin: number;
   /** Ticks both players are driven straight on from a leaf before the territory is judged (rewards long clean lines). */
   momentum: number;
   /** Once the regions are separated, pick the move whose escape search survives longest (dense, dead-end-free filling). */
@@ -106,6 +108,7 @@ export const DEFAULT_OPTIONS: BotOptions = {
   dfsOrder: "open",
   oppReach: 32,
   selfReach: 0,
+  oppMargin: 8,
   momentum: 0,
   fillMode: false,
   proximityRange: 18,
@@ -130,8 +133,6 @@ const MEMO_GRID_MAX = Math.ceil(ARENA / 0.5) + 1;
  * windows) is not mine to escape through if it gets there first; beyond that
  * horizon the bot will have re-planned many times.
  */
-const OPP_REACH = 32;
-const OPP_MARGIN = 8;
 
 export class Bot {
   readonly game = new Game(2);
@@ -696,7 +697,7 @@ export class Bot {
       if (oppDist && driven > 0) {
         const od = oppReachAt(mine.x, mine.y);
         const arrival = driven + offset;
-        if ((od <= this.options.oppReach || arrival <= this.options.selfReach) && od + OPP_MARGIN < arrival) {
+        if ((od <= this.options.oppReach || arrival <= this.options.selfReach) && od + this.options.oppMargin < arrival) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
