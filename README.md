@@ -79,14 +79,17 @@ Every 4 ticks (`src/bot/bot.ts`):
    (the opponent keeps its current turn).
 3. Positions are scored by territory on a "fat" 2-unit grid (cells reached
    strictly first, with trails inflated so corridors too narrow to turn in do
-   not count), by the free area left on a fine 1-unit grid (so it hugs walls
-   instead of wasting space), and by a distance-keeping term that grows
-   quadratically inside 18 units of the opponent's head.
+   not count) and by the free area left on a fine 1-unit grid (so it hugs
+   walls instead of wasting space).
 4. Each first manoeuvre must also pass an escape search: a depth-first
    search over the bot's own manoeuvres, memoised by position and heading,
-   that must find a 640-tick collision-free continuation ending in open space
-   and using only space the bot reaches before the opponent could within the
-   opponent's next two windows. Moves without one are heavily penalised.
+   that must find a 640-tick collision-free continuation ending in open
+   space. For its first 160 ticks the continuation may only use space the
+   bot reaches at least 16 ticks before the opponent could (space within 32
+   ticks of the opponent is held to the same rule along the whole path): a
+   cut-off is nothing more than the opponent getting somewhere on the bot's
+   path first, so a path it could seal is not an escape. Moves without an
+   escape are heavily penalised.
    In these rollouts the opponent follows a projection computed at plan time
    the way the checkpoint actually drives: straight until a wall or trail is
    ahead, then turning along it. A lap along a wall that would seal the bot
@@ -108,31 +111,66 @@ checkpoint, both seat orders per seed, deterministic (greedy) checkpoint play.
 | --- | --- | --- | --- |
 | distance keeping range 14 / weight 300, opponent assumed straight | 26–6 | 15–17 | 41–23, 64% |
 | range 18 / weight 200, opponent assumed straight | 22–10 | 20–12 | 42–22, 66% |
-| **shipped**: range 18 / weight 200, opponent projected along walls | 21–11–1 | 20–11–2 | 41–22–3, 64% |
-| range 22 / weight 150 | – | 16–16 | – |
+| range 18 / weight 200, opponent projected along walls (first release) | 21–11–1 | 20–11–2 | 41–22–3, 64% |
+| **shipped**: no distance keeping, reach rule over the first 160 ticks, 16-tick margin | 25–7 | 19–12–1 | 44–19–1, 69% |
+| same with an 8-tick margin | 23–9 | 21–11 | 44–20, 69% |
+| same with a 24-tick margin | 18–14 | – | – |
+| no distance keeping, no reach rule | 19–13 | – | – |
 
-Ties are rare (3 in the shipped build's 64 games). The two seed batches differ by 20–30 points for every
-configuration tried, so differences of less than ~10 points between
-configurations are noise at this sample size.
+The two seed batches differ by 10–30 points for every configuration tried,
+so differences of less than ~10 points between configurations are noise at
+this sample size.
+
+### Against a hunter
+
+A human beat the first release 10–0 by doing what the checkpoint never does:
+following the bot, running parallel to it on the inside and turning in ahead
+of it. The harness reproduces this with the `hunter` player, the bot with a
+hunting evaluation (it closes in on the point some distance ahead of its
+opponent's head instead of playing territory). Seeds 0–7, both seat orders:
+
+| Bot | vs hunter (aims 24 ahead) | vs hunter (12 ahead) | vs chaser (0 ahead) |
+| --- | --- | --- | --- |
+| first release (distance keeping) | 0–15–1 | 3–13 | 6–9–1 |
+| **shipped** | 9–7 | 9–7 | 13–3 |
+
+Distance keeping was the problem: fleeing a same-speed opponent means running
+straight into a wall and then along it with the hunter parallel on the
+inside; once it turns in ahead, the strip is a dead end and the bot dies at
+the wall within 300–400 ticks. The reach rule alone could not fix that (2–14
+even when applied over the full 640 ticks), because by the time the bot is
+in the strip it is already lost: the losing decision is the flight itself.
+Without distance keeping the bot stays in the open and keeps the opponent
+from getting ahead of it on the inside, and the games become space races it
+wins about as often as it loses against the hunter, and mostly against the
+checkpoint.
+
+The hunting evaluation itself is not a better style for the bot: a hunter
+beats the checkpoint 21–11 (as often as the bot does) and the first release
+15–0, but hunters cut each other off within a few hundred ticks, and with
+the reach rule added it only scores 16–16 against the checkpoint.
 
 Where the bot still loses (from the recorded games, `scripts/doomed.mjs` and
 `scripts/debug/partition.mts`):
 
 - Space races: both players end up in separate regions and the bot's region
   is the smaller or less efficiently filled one, so it runs out of room first
-  (it dies on its own trail after 1500–3000 ticks). The contested-phase play
-  does not yet build deliberate walls; the Voronoi share swings a lot while
-  both players roam.
-- Close encounters: running roughly parallel to the checkpoint 8–12 units
-  away, a single left turn of the checkpoint closes the gap faster than the
-  16-tick lookahead sees. The distance-keeping term reduces these from 11 to 2
-  losses on the hard seed batch at the cost of a few more space races.
+  (it dies on its own trail after 1500–3000 ticks). This is now nearly the
+  only way it loses to the checkpoint (15 of the 19 losses above) and the
+  usual way it loses to a hunter.
+- Close encounters: an opponent crossing the bot's path 10–15 units ahead
+  and then turning towards it can still close the gap faster than the
+  16-tick lookahead sees (3 of the 19 losses above ended on the checkpoint's
+  trail).
 
-Variants that were measured and did not help (all on seeds 0–15, same
-baseline 26–6): straightness bonus (16–16), lane-following escape order with
-wall hugging (16–15–1), longer opponent-reach horizon (16–16), a dedicated
-fill mode that follows the escape search's own path once separated (11–21),
-momentum evaluation (14–18) and bolder territory claims (abandoned at 0–5).
+Variants that were measured and did not help (seeds 0–15 unless noted):
+straightness bonus (16–16), lane-following escape order with wall hugging
+(16–15–1), longer opponent-reach horizon (16–16), a dedicated fill mode that
+follows the escape search's own path once separated (11–21), momentum
+evaluation (14–18), bolder territory claims (abandoned at 0–5), distance
+keeping at a tenth of the weight (3–12–1 against the hunter) and the reach
+rule over the full 640 ticks (8–8 against the hunter, no better than 160
+ticks and far more pessimistic in the opening).
 
 ## Commands
 
@@ -141,6 +179,7 @@ npm install --onnxruntime-node-install-cuda=skip
 npm test                       # engine vs simulator agreement (random games)
 npm run match -- --games=10    # bot vs checkpoint, both seat orders, in the real simulator
 npm run match -- --p0=model --p1=model --games=16 --record=/tmp/mvm
+npm run match -- --p1=hunter --seeds=0,1,2,3,4,5,6,7 --swap --hunter-opts='{"huntAhead":12}'   # against the hunting opponent
 node scripts/analyze.mjs /tmp/mvm           # behaviour profile of recorded games
 node scripts/render.mjs /tmp/mvm/*.json     # PNG of each recorded game
 node scripts/doomed.mjs /tmp/rec            # when did the bot's evaluation collapse
