@@ -96,7 +96,7 @@ Every 4 ticks (`src/bot/bot.ts`):
    into a pocket therefore shows up in the search instead of being missed
    because the opponent was assumed to stop at the first wall.
 
-It is deterministic, takes 15–35 ms per plan in Node (up to ~250 ms in the
+It is deterministic, takes 25–40 ms per plan in Node (up to ~200 ms in the
 worst positions), and runs in real time in the browser worker.
 
 Every weight above is a `BotOptions` field, so variants can be measured
