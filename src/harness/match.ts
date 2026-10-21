@@ -4,9 +4,13 @@
  * the TypeScript bot decides every tick (the same per-tick scheme a human
  * has).
  *
- *   npm run match -- [--p0=bot|model|random] [--p1=bot|model|random] [--games=N]
+ *   npm run match -- [--p0=bot|model|random|hunter] [--p1=bot|model|random|hunter] [--games=N]
  *                    [--seeds=0,1,2] [--swap] [--record=DIR] [--verbose]
- *                    [--bot-opts='{"replan":4}']
+ *                    [--bot-opts='{"replan":4}'] [--hunter-opts='{"huntAhead":20}']
+ *
+ * "hunter" is the bot with a hunting evaluation (it closes in on the point
+ * ahead of its opponent's head instead of keeping its distance): a stand-in
+ * for a human who cuts the bot off.
  *
  * --swap plays every seed twice with the seats exchanged (default when no
  * pairing is given: bot vs model both ways).
@@ -27,6 +31,8 @@ const verbose = args.includes("--verbose");
 const seedArg = opt("seeds", "");
 const recordDir = opt("record", "");
 const botOpts: Partial<BotOptions> = JSON.parse(opt("bot-opts", "{}"));
+const HUNTER: Partial<BotOptions> = { proximityWeight: 0, huntWeight: 40, huntAhead: 12 };
+const hunterOpts: Partial<BotOptions> = { ...HUNTER, ...JSON.parse(opt("hunter-opts", "{}")) };
 if (recordDir) fs.mkdirSync(recordDir, { recursive: true });
 
 const { sim, modelActor, config } = await loadWarpSim();
@@ -91,7 +97,7 @@ function makePlayer(kind: string, seat: number): Player {
       },
     };
   }
-  const bot = new Bot(seat, botOpts);
+  const bot = new Bot(seat, kind === "hunter" ? hunterOpts : botOpts);
   let planMsMax = 0;
   let planMsSum = 0;
   let plans = 0;

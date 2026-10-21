@@ -76,6 +76,8 @@ export interface BotOptions {
   dfsOrder: "open" | "lane";
   /** Space the opponent can reach within this many ticks is not mine to escape through if it gets there first. */
   oppReach: number;
+  /** The first this many ticks of an escape path may only use space I reach before the opponent could (a cut-off would seal anything else). */
+  selfReach: number;
   /** Ticks both players are driven straight on from a leaf before the territory is judged (rewards long clean lines). */
   momentum: number;
   /** Once the regions are separated, pick the move whose escape search survives longest (dense, dead-end-free filling). */
@@ -83,6 +85,9 @@ export interface BotOptions {
   /** Distance keeping: penalty weight × (range − distance)² while the opponent's head is closer than `range`. */
   proximityRange: number;
   proximityWeight: number;
+  /** Hunting (a test opponent for the harness): score penalty per unit of distance to the point `huntAhead` units in front of the opponent's head. */
+  huntWeight: number;
+  huntAhead: number;
 }
 
 export const DEFAULT_OPTIONS: BotOptions = {
@@ -100,10 +105,13 @@ export const DEFAULT_OPTIONS: BotOptions = {
   hugBonus: 0,
   dfsOrder: "open",
   oppReach: 32,
+  selfReach: 0,
   momentum: 0,
   fillMode: false,
   proximityRange: 18,
   proximityWeight: 200,
+  huntWeight: 0,
+  huntAhead: 0,
 };
 
 const TURNS: readonly Turn[] = [0, -1, 1];
@@ -609,6 +617,12 @@ export class Bot {
     const d = Math.sqrt(dx * dx + dy * dy);
     const range = this.options.proximityRange;
     if (d < range) score -= (range - d) * (range - d) * this.options.proximityWeight;
+    if (this.options.huntWeight) {
+      // Hunting: close in on the point ahead of the opponent's head (cut it off).
+      const tx = other.x + this.options.huntAhead * Math.cos(other.angle);
+      const ty = other.y + this.options.huntAhead * Math.sin(other.angle);
+      score -= Math.sqrt((tx - mine.x) * (tx - mine.x) + (ty - mine.y) * (ty - mine.y)) * this.options.huntWeight;
+    }
     return score;
   }
 
@@ -658,7 +672,7 @@ export class Bot {
       }
       if (oppDist && driven > 0) {
         const od = oppDist[fat.cellOf(mine.x, mine.y)];
-        if (od <= this.options.oppReach && od + OPP_MARGIN < driven) {
+        if ((od <= this.options.oppReach || driven <= this.options.selfReach) && od + OPP_MARGIN < driven) {
           if (traceDfs) console.log(`    dfs d${depth} rem ${remaining} at (${mine.x.toFixed(1)},${mine.y.toFixed(1)}) pruned: opponent reach ${od}`);
           return false;
         }
